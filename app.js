@@ -9,6 +9,8 @@ const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
 document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('login-button').addEventListener('click', login);
     document.getElementById('group-select').addEventListener('change', loadStudents);
+    document.getElementById('month-select').addEventListener('change', loadStudents);
+    document.getElementById('subject-select').addEventListener('change', loadStudents);
     document.getElementById('save-absences-button').addEventListener('click', saveAbsences);
     document.getElementById('generate-pdf').addEventListener('click', generatePDF);
 
@@ -29,20 +31,17 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('main-content').style.display = 'block';
             loadGroups();
             
-             // Verificamos si el correo es el del administrador
-        if (data.user.email === 'admin@lfvj.com') {
-            // Mostrar el botón de generar PDF solo si el usuario es admin
-            document.getElementById('generate-pdf').style.display = 'block';
-        } else {
-            // Asegúrate de ocultarlo si no es admin
-            document.getElementById('generate-pdf').style.display = 'none';
+            // Verificamos si el correo es el del administrador
+            if (data.user.email === 'admin@lfvj.com') {
+                // Mostrar el botón de generar PDF solo si el usuario es admin
+                document.getElementById('generate-pdf').style.display = 'block';
+            } else {
+                // Asegúrate de ocultarlo si no es admin
+                document.getElementById('generate-pdf').style.display = 'none';
+            }
         }
-        }
-        
     }
-    
-
-});  // Asegúrate de cerrar correctamente el bloque de 'DOMContentLoaded'
+});  // Cierre del DOMContentLoaded
 
 // 🔹 Cargar grupos
 async function loadGroups() {
@@ -64,70 +63,106 @@ async function loadGroups() {
     });
 }
 
-// 🔹 Cargar estudiantes por grupo (ordenados por primer apellido)
+// 🔹 Cargar estudiantes y ausencias por grupo, mes y materia
 async function loadStudents() {
     const groupId = document.getElementById('group-select').value;
+    const month = document.getElementById('month-select').value;
+    const subject = document.getElementById('subject-select').value;
+
     if (!groupId) {
         alert("Por favor, selecciona un grupo.");
         return;
     }
-
-    const { data: groupData, error: groupError } = await supabase
-        .from('groups')
-        .select('name')
-        .eq('id', groupId);
-
-    if (groupError || groupData.length === 0) {
-        console.error('Error al obtener el grupo:', groupError);
+    if (!month) {
+        alert("Por favor, selecciona un mes.");
+        return;
+    }
+    if (!subject) {
+        alert("Por favor, selecciona una materia.");
         return;
     }
 
-    const groupName = groupData[0].name;
+    // Obtener nombre del grupo
+    const { data: groupData, error: groupError } = await supabase
+        .from('groups')
+        .select('name')
+        .eq('id', groupId)
+        .single();
 
-    // Depuración: Verificar que estamos recibiendo el nombre del grupo correctamente
-    console.log('Nombre del grupo:', groupName);
+    if (groupError || !groupData) {
+        console.error('Error al obtener el grupo:', groupError);
+        return;
+    }
+    const groupName = groupData.name;
 
-    // Consulta para obtener estudiantes ordenados alfabéticamente por apellidos
-    const { data, error } = await supabase
+    // Obtener estudiantes del grupo ordenados por apellido y nombre
+    const { data: students, error: studentsError } = await supabase
         .from('students')
         .select('id, primer_apellido, segundo_apellido, nombre')
-        .eq('grupo', groupName)  // Verifica que 'grupo' sea la columna correcta en la tabla 'students'
+        .eq('grupo', groupName)
         .order('primer_apellido', { ascending: true })
         .order('segundo_apellido', { ascending: true })
         .order('nombre', { ascending: true });
 
-    // Depuración: Verificar si estamos recibiendo estudiantes
-    console.log('Estudiantes obtenidos:', data);
-    if (error) {
-        console.error('Error al cargar los estudiantes:', error);
+    if (studentsError) {
+        console.error('Error al cargar los estudiantes:', studentsError);
         return;
     }
 
-    if (data.length === 0) {
+    if (!students || students.length === 0) {
         console.log('No hay estudiantes en este grupo.');
+        const tbodyEmpty = document.getElementById('students-table').getElementsByTagName('tbody')[0];
+        tbodyEmpty.innerHTML = '';
+        return;
+    }
+
+    // Obtener ausencias existentes para este mes y materia
+    const { data: absences, error: absencesError } = await supabase
+        .from('student_absences')
+        .select('student_id, absence_count')
+        .eq('month', month)
+        .eq('subject', subject);
+
+    if (absencesError) {
+        console.error('Error al cargar ausencias:', absencesError);
         return;
     }
 
     const tbody = document.getElementById('students-table').getElementsByTagName('tbody')[0];
     tbody.innerHTML = '';
 
-    data.forEach(student => {
+    students.forEach(student => {
+        // Buscar ausencia para este estudiante
+        const absenceRecord = absences.find(a => a.student_id === student.id);
+        const absenceCount = absenceRecord ? absenceRecord.absence_count : 0;
+
         const row = tbody.insertRow();
         row.insertCell(0).textContent = `${student.primer_apellido} ${student.segundo_apellido} ${student.nombre}`;
 
         const absenceCell = row.insertCell(1);
         const absenceInput = document.createElement('input');
         absenceInput.type = 'number';
-        absenceInput.value = 0;
+        absenceInput.min = 0;
+        absenceInput.value = absenceCount;
         absenceInput.dataset.studentId = student.id;
         absenceCell.appendChild(absenceInput);
     });
 }
 
-// 🔹 Guardar ausencias en la base de datos
+// 🔹 Guardar ausencias con upsert (insertar o actualizar)
 async function saveAbsences() {
     const month = document.getElementById('month-select').value;
     const subject = document.getElementById('subject-select').value;
+
+    if (!month) {
+        alert("Por favor, selecciona un mes.");
+        return;
+    }
+    if (!subject) {
+        alert("Por favor, selecciona una materia.");
+        return;
+    }
+
     const inputs = document.querySelectorAll('#students-table tbody input');
 
     const absenceRecords = Array.from(inputs).map(input => ({
@@ -148,6 +183,7 @@ async function saveAbsences() {
         alert('Ausencias guardadas correctamente.');
     }
 }
+
 // Generar PDF
 const { jsPDF } = window.jspdf;
 
@@ -194,83 +230,61 @@ async function generatePDF() {
     const { data: studentsData, error: studentsError } = await supabase
         .from('students')
         .select('id, primer_apellido, segundo_apellido, nombre')
-        .eq('grupo', groupName);  // Aquí usamos el nombre del grupo
+        .eq('grupo', groupName)
+        .order('primer_apellido', { ascending: true })
+        .order('segundo_apellido', { ascending: true })
+        .order('nombre', { ascending: true });
 
     if (studentsError) {
-        console.error("❌ Error al cargar los estudiantes:", studentsError);
+        console.error("❌ Error al obtener los estudiantes:", studentsError);
         alert("Error al cargar los estudiantes.");
         return;
     }
 
     console.log("Estudiantes obtenidos:", studentsData);
 
-    // 🔹 Obtener las ausencias de los estudiantes
-    const { data: absencesData, error: absencesError } = await supabase
-        .from('student_absences')
-        .select('student_id, absence_count, subject, month');
-
-    if (absencesError) {
-        console.error("❌ Error al cargar las ausencias:", absencesError);
-        alert("Error al cargar las ausencias.");
-        return;
-    }
-
-    console.log("Ausencias obtenidas:", absencesData);
-
-    // 🔹 Generar un PDF para cada estudiante con un pequeño retraso entre cada uno
-    for (let i = 0; i < studentsData.length; i++) {
-        const student = studentsData[i];
-
-        // Esperar 500ms entre cada PDF para evitar bloqueos
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Filtramos las ausencias de este estudiante
-        const studentAbsences = absencesData.filter(a => a.student_id === student.id);
-
-        // Crear un nuevo PDF por cada estudiante
+    // 🔹 Recorrer cada estudiante y generar el PDF
+    for (const student of studentsData) {
         const doc = new jsPDF();
 
-        // Cargar la imagen en el encabezado
-        await doc.addImage('https://qqcxntabmbnekeankpld.supabase.co/storage/v1/object/sign/images/pdf.png?token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1cmwiOiJpbWFnZXMvcGRmLnBuZyIsImlhdCI6MTc0MTU2NDIwOSwiZXhwIjoxODk5MjQ0MjA5fQ.rA9zsVBGPPWFCfOOd6CQwby_uQD6lJtTtmbFIzPphXQ', 'PNG', 0, 0, 200, 20);
-
-        // Título del informe
         doc.setFontSize(16);
-        doc.text('Informe de Ausencias', 80, 25);
-
-        // Información del estudiante, grupo, y mes
+        doc.text('Informe de ausencias', 10, 10);
         doc.setFontSize(12);
-        doc.text(`Estudiante: ${student.primer_apellido} ${student.segundo_apellido} ${student.nombre}`, 10, 30);
-        doc.text(`Grupo: ${groupName}`, 150, 30);
-       
-        // Crear los encabezados de la tabla: Asignaturas y Meses
-        const tableHead = ['Asignatura', ...months];
+        doc.text(`Estudiante: ${student.primer_apellido} ${student.segundo_apellido} ${student.nombre}`, 10, 20);
+        doc.text(`Grupo: ${groupName}`, 10, 30);
 
-        // Organizar los datos de la tabla
-        const tableBody = subjectsData.map(subject => {
-            const absenceCounts = months.map(month => {
-                // Buscamos la ausencia en la base de datos, asegurándonos de que el mes esté en minúsculas en la base de datos
-                const absence = studentAbsences.find(a => a.subject === subject.name && a.month === month.toLowerCase());
-                return absence ? absence.absence_count : 0;
-            });
-            return [subject.name, ...absenceCounts];
-        });
+        let y = 40;
 
-        // Crear la tabla con las asignaturas y las ausencias por mes
-        doc.autoTable({
-            startY: 35,
-            head: [tableHead], // Encabezados: Asignaturas y Meses
-            body: tableBody,   // Datos: Ausencias por asignatura y mes
-        });
+        // 🔹 Consultar las ausencias para este estudiante, cada mes y cada asignatura
+        for (const month of months) {
+            doc.text(`Mes: ${month}`, 10, y);
+            y += 10;
 
-        // Espacio para la firma
-        doc.text('Firma del Profesor:', 10, doc.lastAutoTable.finalY + 10);
-        doc.line(10, doc.lastAutoTable.finalY + 22, 200, doc.lastAutoTable.finalY + 22);
+            for (const subject of subjectsData) {
+                // Obtener ausencia del estudiante para este mes y materia
+                const { data: absenceData, error: absenceError } = await supabase
+                    .from('student_absences')
+                    .select('absence_count')
+                    .eq('student_id', student.id)
+                    .eq('month', month)
+                    .eq('subject', subject.name)
+                    .single();
 
-        // Guardar el PDF con el nombre del estudiante
-        const fileName = `${student.primer_apellido}_${student.segundo_apellido}_${student.nombre}_ausencias.pdf`;
-        console.log(`✅ PDF generado: ${fileName}`);
-        doc.save(fileName);
+                if (absenceError) {
+                    console.error(`Error al obtener ausencia para ${student.nombre} en ${month} y ${subject.name}:`, absenceError);
+                    doc.text(`- ${subject.name}: Error al obtener datos`, 20, y);
+                } else {
+                    const absenceCount = absenceData ? absenceData.absence_count : 0;
+                    doc.text(`- ${subject.name}: ${absenceCount}`, 20, y);
+                }
+                y += 10;
+            }
+        }
+
+        // 🔹 Guardar PDF en disco (esto solo descarga en navegador)
+        doc.save(`Ausencias_${student.primer_apellido}_${student.nombre}.pdf`);
+
+        // 🔹 Pausa entre generación de PDFs para no saturar la memoria
+        await new Promise(resolve => setTimeout(resolve, 500));
     }
-
-    console.log('🎉 Proceso completado.');
 }
